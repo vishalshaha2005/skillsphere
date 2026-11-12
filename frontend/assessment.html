@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f4f8ff" />
+    <title>Technical assessment — SkillSphere</title>
+    <link rel="icon" href="data:," />
+    <script src="/theme.js"></script>
+    <link rel="stylesheet" href="/assessment.css" />
+    <script defer src="/assessment.js"></script>
+  </head>
+  <body>
+    <main class="assessment-shell">
+      <div class="assessment-header">
+        <a class="assessment-brand" href="/">SkillSphere</a>
+        <button id="theme-toggle" class="assessment-theme-toggle" type="button" aria-label="Switch to dark mode" aria-pressed="false" title="Switch to dark mode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13z"/></svg></button>
+      </div>
+      <div id="assessment-app" class="assessment-card" aria-live="polite">
+        <p>Loading your assessment…</p>
+      </div>
+      <aside id="assessment-monitor" class="assessment-monitor" hidden aria-live="polite">
+        <div class="assessment-camera-preview">
+          <video id="assessment-camera" autoplay muted playsinline></video>
+          <span class="camera-active-indicator"><i></i> Camera active</span>
+        </div>
+        <div class="assessment-monitor-status">
+          <strong id="assessment-warning-count">Warnings: 0</strong>
+          <p id="assessment-monitor-message">Your camera is active. Video is not recorded.</p>
+        </div>
+        <div id="assessment-alert" class="assessment-toast" role="status" hidden></div>
+      </aside>
+    </main>
+  </body>
+</html>
