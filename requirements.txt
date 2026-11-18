@@ -8,3 +8,4 @@ pypdfium2>=4.30.0
 pillow>=10.0.0
 pytesseract>=0.3.10
 cloudinary>=1.36.0
+libsql-experimental>=0.0.40; sys_platform != "win32" or python_version < "3.13"

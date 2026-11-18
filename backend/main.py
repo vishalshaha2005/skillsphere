@@ -48,6 +48,20 @@ CSRF_COOKIE_NAME = "skillsphere_csrf"
 COOKIE_PATH = "/"
 DEFAULT_SECRET = "local-development-only-change-before-deploying"
 
+TURSO_DATABASE_URL = os.environ.get("TURSO_DATABASE_URL", "").strip()
+TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "").strip()
+
+try:
+    import libsql_experimental as libsql
+    HAS_LIBSQL = True
+except ImportError:
+    libsql = None
+    HAS_LIBSQL = False
+
+
+def turso_configured() -> bool:
+    return bool(HAS_LIBSQL and TURSO_DATABASE_URL and TURSO_AUTH_TOKEN)
+
 
 def current_is_production() -> bool:
     return os.environ.get("SKILLSPHERE_ENV", "development").lower() == "production"
@@ -303,6 +317,35 @@ def now() -> str:
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if turso_configured():
+        try:
+            # Embedded replica mode: ultra-fast local SQLite synced with Turso cloud
+            connection = libsql.connect(
+                str(DB_PATH),
+                sync_url=TURSO_DATABASE_URL,
+                auth_token=TURSO_AUTH_TOKEN,
+            )
+            try:
+                connection.sync()
+            except Exception as sync_err:
+                logger.warning("Turso pre-sync notice: %s", sync_err)
+            connection.row_factory = sqlite3.Row
+            try:
+                yield connection
+                connection.commit()
+                try:
+                    connection.sync()
+                except Exception as sync_err:
+                    logger.warning("Turso post-sync notice: %s", sync_err)
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+            return
+        except Exception as err:
+            logger.error("Turso connection failed, falling back to local SQLite: %s", err)
+
     connection = sqlite3.connect(DB_PATH, timeout=15)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
