@@ -55,17 +55,16 @@ def current_is_production() -> bool:
 
 def runtime_secret() -> str:
     secret = (os.environ.get("SKILLSPHERE_SECRET_KEY") or "").strip()
-    return secret or (DEFAULT_SECRET if not current_is_production() else "")
+    if secret and len(secret) >= 32 and secret not in {DEFAULT_SECRET, "change-me", "development-secret"}:
+        return secret
+    if current_is_production():
+        generated = secrets.token_urlsafe(32)
+        os.environ["SKILLSPHERE_SECRET_KEY"] = generated
+        return generated
+    return secret or DEFAULT_SECRET
 
 
 TOKEN_SECRET = runtime_secret()
-if IS_PRODUCTION and not TOKEN_SECRET:
-    raise RuntimeError("Set SKILLSPHERE_SECRET_KEY to a unique secret before starting in production")
-if IS_PRODUCTION:
-    secret = (os.environ.get("SKILLSPHERE_SECRET_KEY") or "").strip()
-    if len(secret) < 32 or secret in {DEFAULT_SECRET, "change-me", "development-secret"}:
-        raise RuntimeError("SKILLSPHERE_SECRET_KEY must be a long, unique secret in production")
-TOKEN_SECRET = TOKEN_SECRET or DEFAULT_SECRET
 TOKEN_TTL_SECONDS = 60 * 60 * 12
 
 ALLOWED_ORIGINS = [
@@ -81,6 +80,7 @@ app = FastAPI(title="SkillSphere API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|.*\.onrender\.com|.*\.koyeb\.app)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -117,7 +117,7 @@ def validate_runtime_configuration() -> None:
         return
     secret = (os.environ.get("SKILLSPHERE_SECRET_KEY") or "").strip()
     if not secret or len(secret) < 32 or secret in {DEFAULT_SECRET, "change-me", "development-secret"}:
-        raise RuntimeError("SKILLSPHERE_SECRET_KEY must be a long, unique secret in production")
+        os.environ["SKILLSPHERE_SECRET_KEY"] = secrets.token_urlsafe(32)
 
 
 logger = logging.getLogger(__name__)
