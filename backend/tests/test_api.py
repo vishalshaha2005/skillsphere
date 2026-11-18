@@ -78,6 +78,10 @@ class SkillSphereApiTests(unittest.TestCase):
         return candidate, response.json()
 
     def start_assessment(self, token):
+        self.client.post(
+            f"/api/assessments/{token}/recording/start",
+            json={"consent_given": True},
+        )
         camera = self.client.post(
             f"/api/assessments/{token}/proctoring/start",
             json={"permission_granted": True},
@@ -660,6 +664,7 @@ class SkillSphereApiTests(unittest.TestCase):
             "SKILLSPHERE_MAX_PROCTORING_WARNINGS": "3",
             "SKILLSPHERE_FACE_MISSING_WARNING_SECONDS": "10",
             "SKILLSPHERE_AUTO_SUBMIT_ON_MAX_WARNINGS": "false",
+            "SKILLSPHERE_RECORDING_REQUIRED": "false",
         }):
             camera = self.client.post(
                 f"/api/assessments/{token}/proctoring/start",
@@ -1932,6 +1937,156 @@ Answer: B
         self.assertEqual(face_ev.status_code, 200)
         self.assertEqual(face_ev.json()["accepted"], True)
         self.assertEqual(face_ev.json()["warning_count"], 1)  # Does not increment warning count
+
+    def test_recording_consent_and_start_gates_assessment(self):
+        candidate, recruiter, application = self.create_assessment_application(
+            ["Python"], "Python", ["Python"]
+        )
+        token = application["_test_assessment_link"].split("token=")[1]
+
+        with patch.dict("os.environ", {"SKILLSPHERE_RECORDING_REQUIRED": "true"}):
+            # Camera granted but recording consent NOT given
+            self.client.post(
+                f"/api/assessments/{token}/proctoring/start",
+                json={"permission_granted": True},
+            )
+            start_resp = self.client.post(f"/api/assessments/{token}/start")
+            self.assertEqual(start_resp.status_code, 409)
+            self.assertIn("Consent to webcam recording", start_resp.json()["detail"])
+
+            # Disagreeing with consent raises 422
+            disagree_resp = self.client.post(
+                f"/api/assessments/{token}/recording/start",
+                json={"consent_given": False},
+            )
+            self.assertEqual(disagree_resp.status_code, 422)
+
+            # Agreeing with consent succeeds and initializes recording record
+            agree_resp = self.client.post(
+                f"/api/assessments/{token}/recording/start",
+                json={"consent_given": True, "consent_version": "1.0"},
+            )
+            self.assertEqual(agree_resp.status_code, 200)
+            self.assertTrue(agree_resp.json()["consent_recorded"])
+
+            # Now start assessment succeeds
+            started = self.client.post(f"/api/assessments/{token}/start")
+            self.assertEqual(started.status_code, 200)
+
+    def test_recording_upload_and_status_tracking(self):
+        candidate, recruiter, application = self.create_assessment_application(
+            ["Python"], "Python", ["Python"]
+        )
+        token = application["_test_assessment_link"].split("token=")[1]
+        self.start_assessment(token)
+
+        # File size exceeds limit
+        with patch.dict("os.environ", {"SKILLSPHERE_RECORDING_MAX_UPLOAD_MB": "1"}):
+            oversized_data = b"0" * (1024 * 1024 + 100)
+            res_oversized = self.client.post(
+                f"/api/assessments/{token}/recording/upload",
+                files={"file": ("recording.webm", oversized_data, "video/webm")},
+                data={"duration_seconds": 30},
+            )
+            self.assertEqual(res_oversized.status_code, 413)
+
+        # Successful upload (fallback mode when Cloudinary not configured)
+        valid_video = b"RIFF....WEBMVIDEO"
+        res_upload = self.client.post(
+            f"/api/assessments/{token}/recording/upload",
+            files={"file": ("recording.webm", valid_video, "video/webm")},
+            data={"duration_seconds": 45},
+        )
+        self.assertEqual(res_upload.status_code, 200)
+        self.assertEqual(res_upload.json()["status"], "Uploaded")
+        self.assertEqual(res_upload.json()["duration_seconds"], 45)
+
+        # Verify DB state
+        with main.connect() as db:
+            row = db.execute("SELECT * FROM assessment_recordings WHERE duration_seconds = 45").fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["recording_status"], "Uploaded")
+            self.assertEqual(row["file_size_bytes"], len(valid_video))
+
+    def test_recording_playback_security_and_role_access(self):
+        candidate, recruiter, application = self.create_assessment_application(
+            ["Python"], "Python", ["Python"]
+        )
+        token = application["_test_assessment_link"].split("token=")[1]
+        self.start_assessment(token)
+
+        # Upload recording
+        self.client.post(
+            f"/api/assessments/{token}/recording/upload",
+            files={"file": ("recording.webm", b"VIDEO_DATA", "video/webm")},
+            data={"duration_seconds": 60},
+        )
+
+        with main.connect() as db:
+            recording = db.execute("SELECT id FROM assessment_recordings ORDER BY id DESC LIMIT 1").fetchone()
+            rec_id = recording["id"]
+
+        admin_headers = self.login("admin@skillsphere.dev")
+
+        # Candidate blocked
+        cand_resp = self.client.get(f"/api/admin/recordings/{rec_id}/playback", headers=candidate)
+        self.assertEqual(cand_resp.status_code, 403)
+
+        # Recruiter blocked
+        recr_resp = self.client.get(f"/api/admin/recordings/{rec_id}/playback", headers=recruiter)
+        self.assertEqual(recr_resp.status_code, 403)
+
+        # Admin allowed
+        admin_resp = self.client.get(f"/api/admin/recordings/{rec_id}/playback", headers=admin_headers)
+        self.assertEqual(admin_resp.status_code, 200)
+        self.assertEqual(admin_resp.json()["recording_id"], rec_id)
+
+        # Verify access was logged in admin_recording_access_logs
+        with main.connect() as db:
+            log_row = db.execute("SELECT * FROM admin_recording_access_logs WHERE recording_id = ?", (rec_id,)).fetchone()
+            self.assertIsNotNone(log_row)
+
+    def test_recording_cleanup_retention_policy_excludes_flagged(self):
+        candidate, recruiter, application = self.create_assessment_application(
+            ["Python"], "Python", ["Python"]
+        )
+        token = application["_test_assessment_link"].split("token=")[1]
+        self.start_assessment(token)
+
+        # Upload recording
+        self.client.post(
+            f"/api/assessments/{token}/recording/upload",
+            files={"file": ("recording.webm", b"VIDEO_DATA", "video/webm")},
+            data={"duration_seconds": 120},
+        )
+
+        with main.connect() as db:
+            rec = db.execute("SELECT id, assessment_id FROM assessment_recordings ORDER BY id DESC LIMIT 1").fetchone()
+            rec_id = rec["id"]
+            assess_id = rec["assessment_id"]
+            old_date = (main.datetime.now(main.timezone.utc) - main.timedelta(days=100)).isoformat()
+            db.execute("UPDATE assessment_recordings SET uploaded_at = ? WHERE id = ?", (old_date, rec_id))
+            db.execute("UPDATE assessments SET flagged_for_review = 1 WHERE id = ?", (assess_id,))
+
+        admin_headers = self.login("admin@skillsphere.dev")
+
+        # Cleanup with retention 90 days: flagged recording should NOT be expired
+        with patch.dict("os.environ", {"SKILLSPHERE_RECORDING_RETENTION_DAYS": "90"}):
+            res1 = self.client.post("/api/admin/recordings/cleanup", headers=admin_headers)
+            self.assertEqual(res1.status_code, 200)
+            self.assertEqual(res1.json()["cleaned_count"], 0)
+
+            # Unflag assessment: now cleanup should expire it
+            with main.connect() as db:
+                db.execute("UPDATE assessments SET flagged_for_review = 0 WHERE id = ?", (assess_id,))
+
+            res2 = self.client.post("/api/admin/recordings/cleanup", headers=admin_headers)
+            self.assertEqual(res2.status_code, 200)
+            self.assertEqual(res2.json()["cleaned_count"], 1)
+
+            with main.connect() as db:
+                updated_rec = db.execute("SELECT recording_status FROM assessment_recordings WHERE id = ?", (rec_id,)).fetchone()
+                self.assertEqual(updated_rec["recording_status"], "Expired")
 
 
 if __name__ == "__main__":

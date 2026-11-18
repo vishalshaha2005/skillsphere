@@ -132,7 +132,7 @@ The selected questions and answer options are snapshotted, so later bank edits d
 
 #### Camera proctoring and assessment integrity
 
-When proctoring is required, the candidate first sees a clear consent and privacy notice and must grant camera access via `getUserMedia()` before the assessment timer starts or questions are returned. Assessment questions and the countdown timer remain hidden until camera access is granted and a live video stream is active. A live camera preview stays visible in a fixed corner during the test alongside a "Camera active" indicator and live warning counter. Face-presence detection runs entirely client-side in the candidate's browser (using native `FaceDetector` API when supported, client-side MediaPipe Tasks Vision, or camera frame presence fallback). Video stream and camera monitoring stop immediately upon assessment submission, test expiration, or navigating away.
+When proctoring is required, the candidate first sees a clear consent and privacy notice and must grant camera access via `getUserMedia()` before the assessment timer starts or questions are returned. When webcam recording is enabled, candidates are also presented with an explicit webcam recording consent checkbox that must be accepted before starting the test. Assessment questions and the countdown timer remain hidden until camera access is granted and a live video stream is active. A live camera preview stays visible in a fixed corner during the test alongside a "Camera active" badge, a pulsing red "REC" indicator (when recording), and live warning counter. Face-presence detection runs entirely client-side in the candidate's browser (using native `FaceDetector` API when supported, client-side MediaPipe Tasks Vision, or camera frame presence fallback). Video stream and camera monitoring stop immediately upon assessment submission, test expiration, or navigating away.
 
 The browser monitors and reports metadata events for:
 - Camera permission granted, denied, unavailable, or revoked mid-test
@@ -151,30 +151,47 @@ Legitimate candidates are never disqualified or failed based on a single event o
 
 All events are stored securely in the SQLite `assessment_proctoring_events` table and the `assessments` table. Recruiters review integrity summaries and event timelines from **Applicants**, the recruiter **Assessments** table, and the dedicated endpoints (`/api/assessments/{id}/proctoring` and `/api/applications/{application_id}/assessment/proctoring`). Recruiters can access only assessments for their own job listings. Administrators review platform-wide integrity in the **Proctoring** workspace with filters for job, recruiter, candidate, date range, status, and flagged state.
 
-**Privacy notice:** Raw video, audio, screenshots, biometric templates, face recognition, and identity matching are never recorded, uploaded, or stored. Proctoring data is strictly limited to event metadata (event type, severity, description, timestamp, duration, and warning number).
+#### Webcam Video Recording and Cloudinary Storage
+
+For comprehensive auditability, SkillSphere captures candidate webcam video via the browser `MediaRecorder` API and uploads it securely:
+
+1. **Client-side Recording:** The browser records video in 10-second chunks using supported codecs (`video/webm` or `video/mp4`). A pulsing red recording indicator remains visible in the camera preview.
+2. **Non-blocking Upload:** Upon test submission, timeout, or completion, the video blob is uploaded via `POST /api/assessments/{token}/recording/upload`. Test scoring and result display are non-blocking and never fail if upload is slow or interrupted.
+3. **Cloudinary Integration:** Server-side upload to Cloudinary uses authenticated signed uploads tagged by assessment ID and candidate ID. If Cloudinary credentials are not configured, the system falls back gracefully without interrupting tests.
+4. **Role Separation & Playback Security:**
+   - **Recruiters** see only recording status badges (`Uploaded`, `Pending`, `Failed`) and duration, never video files or playback URLs.
+   - **Administrators** can review video playback in the Admin Proctoring dashboard. Playback URLs are generated as short-lived, signed expiring URLs (`/api/admin/recordings/{id}/playback`). Every playback request is audited in `admin_recording_access_logs`.
+5. **Retention Policy & Cleanup:** The retention cleaner (`POST /api/admin/recordings/cleanup`) destroys video assets older than `SKILLSPHERE_RECORDING_RETENTION_DAYS` (default 90 days), while automatically preserving recordings for assessments marked **Flagged for Review**.
 
 Supported browsers include current desktop versions of Google Chrome, Microsoft Edge, Mozilla Firefox, and Apple Safari with camera support. The page must be opened over HTTPS or localhost for browser camera permission to be granted.
 
-Configure proctoring with:
+Configure proctoring and video recording with:
 
 | Variable | Description | Default |
 |---|---|---|
 | `SKILLSPHERE_PROCTORING_REQUIRED` | Require candidate consent and camera flow for new assessments (`true`/`false`) | `true` |
+| `SKILLSPHERE_RECORDING_REQUIRED` | Require candidate webcam video recording (`true`/`false`) | `true` |
 | `SKILLSPHERE_FACE_MISSING_WARNING_SECONDS` | Continuous face-absence duration in seconds before a warning is recorded | `10` |
 | `SKILLSPHERE_MAX_PROCTORING_WARNINGS` | Warning threshold that flags an assessment for review | `3` |
 | `SKILLSPHERE_AUTO_SUBMIT_ON_MAX_WARNINGS` | Automatically submit assessment when max warnings threshold is reached (`true`/`false`) | `false` |
+| `CLOUDINARY_CLOUD_NAME` | Cloudinary account cloud name | `""` |
+| `CLOUDINARY_API_KEY` | Cloudinary account API key | `""` |
+| `CLOUDINARY_API_SECRET` | Cloudinary account API secret (server-side only, never sent to browser) | `""` |
+| `SKILLSPHERE_CLOUDINARY_ENABLED` | Enable Cloudinary upload (`true`/`false`) | `true` |
+| `SKILLSPHERE_RECORDING_MAX_UPLOAD_MB` | Maximum video recording upload size in megabytes | `100` |
+| `SKILLSPHERE_RECORDING_RETENTION_DAYS` | Days before non-flagged recordings are eligible for cleanup | `90` |
 
 Manual end-to-end verification checklist:
 1. Open a secure assessment link (`/assessment.html?token=...`).
 2. Review the proctoring consent screen and verify questions and timer are hidden.
-3. Click **Allow Camera and Start Test** and grant camera permission when prompted by the browser.
-4. Verify the live camera preview appears with the "Camera active" badge, the 20 questions load, and the countdown timer begins.
+3. Check the webcam recording consent checkbox and click **Allow Camera and Start Test**. Grant camera permission when prompted.
+4. Verify the live camera preview appears with the "Camera active" badge, the pulsing red "REC" indicator, the 20 questions load, and the countdown timer begins.
 5. Switch browser tabs or minimize the window, then return: verify a warning toast is shown and warning count increments.
 6. Cover or step away from camera for under 10 seconds: verify no warning is recorded for brief gaps. Step away for >10 seconds: verify face-missing warning toast is shown. Return to camera view: verify recovery is acknowledged.
-7. Complete and submit the 20-MCQ assessment: verify camera stream stops immediately and results screen displays.
-8. Sign in as the job's recruiter (`recruiter@skillsphere.dev`): navigate to **Applicants** or **Assessments**, verify the proctoring summary badge, and click **Proctoring timeline** to view the timestamped event audit trail.
+7. Complete and submit the 20-MCQ assessment: verify camera stream stops immediately, video upload proceeds in background, and results screen displays score.
+8. Sign in as the job's recruiter (`recruiter@skillsphere.dev`): navigate to **Applicants** or **Assessments**, verify the proctoring summary badge, recording status, and click **Proctoring timeline** to view the timestamped event audit trail (verify recruiter cannot see video playback).
 9. Sign in as another recruiter: verify trying to access this applicant's proctoring timeline returns a 404/access denied.
-10. Sign in as an administrator (`admin@skillsphere.dev`): navigate to **Proctoring** to view platform analytics, filtered records, highest warning counts, and recent suspicious activity.
+10. Sign in as an administrator (`admin@skillsphere.dev`): navigate to **Proctoring** to view platform analytics, recording upload metrics, click **Play** or **Watch recording** to review the recorded video alongside the event timeline in the playback modal.
 
 Configure outbound email and the public site URL with these environment variables:
 

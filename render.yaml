@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: skillsphere
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: SKILLSPHERE_SECRET_KEY
+        generateValue: true
+      - key: SKILLSPHERE_PROCTORING_REQUIRED
+        value: "true"
+      - key: SKILLSPHERE_RECORDING_REQUIRED
+        value: "false"

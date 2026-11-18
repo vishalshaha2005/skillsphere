@@ -7,3 +7,4 @@ pypdf==5.4.1
 pypdfium2==4.30.1
 pillow==10.4.0
 pytesseract==0.3.13
+cloudinary>=1.36.0

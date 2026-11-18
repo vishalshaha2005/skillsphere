@@ -110,6 +110,14 @@ function getCookie(name) {
   return match ? decodeURIComponent(match[1]) : "";
 }
 
+function formatDetail(detail, fallback = "Request failed") {
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map(item => (typeof item === "object" && item !== null ? item.msg || JSON.stringify(item) : String(item))).join("; ");
+  }
+  return fallback;
+}
+
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
@@ -122,7 +130,7 @@ async function api(path, options = {}) {
   const response = await fetch(`${API}${path}`, { ...options, headers, credentials: "same-origin" });
   let payload = {};
   try { payload = await response.json(); } catch { payload = {}; }
-  if (!response.ok) throw new Error(payload.detail || `Request failed (${response.status})`);
+  if (!response.ok) throw new Error(formatDetail(payload.detail, `Request failed (${response.status})`));
   return payload;
 }
 
@@ -475,21 +483,59 @@ function assessmentsPage() {
 function renderAssessmentReview() {
   const review = state.assessmentReview;
   const proctoring = review.proctoring || {};
-  return `<section class="card assessment-result-panel"><div class="card-heading"><div><span class="eyebrow">Assessment result</span><h2>${esc(review.candidate_name)} · ${esc(review.job_title)}</h2><p>${esc(review.company)} · ${esc(review.assessment_name)} · ${esc(review.score)}% · ${esc(review.correct_answer_count)}/${esc(review.total_questions)} correct · ${esc(review.result)}</p></div><button class="icon-button" data-action="close-assessment-review" aria-label="Close assessment result">×</button></div><p class="form-hint">Current pipeline stage: ${esc(review.application_status)} · Completed ${esc(dateLabel(review.result_processed_at || review.submitted_at))} · Time taken: ${review.time_taken_seconds == null ? "—" : `${Math.floor(review.time_taken_seconds / 60)}m ${review.time_taken_seconds % 60}s`}</p><p class="form-hint">Selected technologies: ${(review.selected_topics || []).map(esc).join(", ") || esc(review.technology)}</p><p class="form-hint">${esc(review.selection_reasoning || "")}</p><div class="proctoring-compact"><strong>Integrity summary:</strong> Camera ${proctoring.camera_permission_granted ? "granted" : "not granted"} · ${esc(proctoring.warning_count || 0)} warnings · ${esc(proctoring.tab_switch_count || 0)} tab switches · ${esc(proctoring.face_not_visible_incidents || 0)} prolonged face warnings · ${proctoring.flagged_for_review ? "Flagged for Review" : "Not flagged"} <button class="text-button" data-action="review-proctoring" data-id="${esc(review.id)}">View event timeline</button></div><div class="assessment-answer-list">${review.questions.map(question => `<article class="assessment-answer"><strong>${esc(question.number)}. ${esc(question.question)}</strong><ol>${question.options.map((option, index) => `<li class="${index === question.correct_answer ? "correct-option" : ""} ${index === question.selected_answer ? "selected-option" : ""}">${esc(option)}${index === question.selected_answer ? " · candidate choice" : ""}${index === question.correct_answer ? " · correct" : ""}</li>`).join("")}</ol></article>`).join("")}</div></section>`;
+  return `<section class="card assessment-result-panel"><div class="card-heading"><div><span class="eyebrow">Assessment result</span><h2>${esc(review.candidate_name)} · ${esc(review.job_title)}</h2><p>${esc(review.company)} · ${esc(review.assessment_name)} · ${esc(review.score)}% · ${esc(review.correct_answer_count)}/${esc(review.total_questions)} correct · ${esc(review.result)}</p></div><button class="icon-button" data-action="close-assessment-review" aria-label="Close assessment result">×</button></div><p class="form-hint">Current pipeline stage: ${esc(review.application_status)} · Completed ${esc(dateLabel(review.result_processed_at || review.submitted_at))} · Time taken: ${review.time_taken_seconds == null ? "—" : `${Math.floor(review.time_taken_seconds / 60)}m ${review.time_taken_seconds % 60}s`}</p><p class="form-hint">Selected technologies: ${(review.selected_topics || []).map(esc).join(", ") || esc(review.technology)}</p><p class="form-hint">${esc(review.selection_reasoning || "")}</p><div class="proctoring-compact"><strong>Integrity summary:</strong> Camera ${proctoring.camera_permission_granted ? "granted" : "not granted"} · ${esc(proctoring.warning_count || 0)} warnings · ${esc(proctoring.tab_switch_count || 0)} tab switches · ${esc(proctoring.face_not_visible_incidents || 0)} prolonged face warnings · ${proctoring.flagged_for_review ? "Flagged for Review" : "Not flagged"}${review.recording ? ` · Webcam recording: ${esc(review.recording.recording_status)}` : ""} <button class="text-button" data-action="review-proctoring" data-id="${esc(review.id)}">View event timeline</button></div><div class="assessment-answer-list">${review.questions.map(question => `<article class="assessment-answer"><strong>${esc(question.number)}. ${esc(question.question)}</strong><ol>${question.options.map((option, index) => `<li class="${index === question.correct_answer ? "correct-option" : ""} ${index === question.selected_answer ? "selected-option" : ""}">${esc(option)}${index === question.selected_answer ? " · candidate choice" : ""}${index === question.correct_answer ? " · correct" : ""}</li>`).join("")}</ol></article>`).join("")}</div></section>`;
 }
 
 function renderProctoringReview() {
   const review = state.proctoringReview;
   if (!review) return "";
   const summary = review.summary || {};
-  return `<section class="card assessment-result-panel proctoring-detail"><div class="card-heading"><div><span class="eyebrow">Assessment integrity</span><h2>Proctoring event timeline</h2><p>Camera footage is not stored. This timeline contains browser and face-presence event metadata only.</p></div><button class="icon-button" data-action="close-proctoring-review" aria-label="Close proctoring timeline">×</button></div><div class="proctoring-compact">Camera ${summary.camera_permission_granted ? "granted" : "not granted"} · ${esc(summary.warning_count || 0)} warnings · ${esc(summary.tab_switch_count || 0)} tab switches · ${esc(summary.face_not_visible_incidents || 0)} prolonged face warnings · ${summary.flagged_for_review ? "Flagged for Review" : "Not flagged"}</div>${review.events.length ? `<div class="table-wrap"><table><thead><tr><th>Date/time</th><th>Event</th><th>Severity</th><th>Description</th><th>Warning</th><th>Duration</th></tr></thead><tbody>${review.events.map(item => `<tr><td>${esc(new Date(item.occurred_at).toLocaleString())}</td><td>${esc(item.event_type.replaceAll("_", " "))}</td><td><span class="badge ${item.severity === "High" ? "badge-red" : item.severity === "Warning" ? "badge-blue" : ""}">${esc(item.severity)}</span></td><td>${esc(item.message)}</td><td>${item.warning_number == null ? "—" : esc(item.warning_number)}</td><td>${item.duration_seconds == null ? "—" : `${esc(item.duration_seconds)}s`}</td></tr>`).join("")}</tbody></table></div>` : empty("No proctoring events recorded", "No camera or browser activity events were recorded for this assessment.")}</section>`;
+  const rec = review.recording;
+  return `<section class="card assessment-result-panel proctoring-detail"><div class="card-heading"><div><span class="eyebrow">Assessment integrity</span><h2>Proctoring event timeline</h2><p>Camera footage is stored securely. This timeline contains browser and face-presence event metadata.</p></div><button class="icon-button" data-action="close-proctoring-review" aria-label="Close proctoring timeline">×</button></div><div class="proctoring-compact">Camera ${summary.camera_permission_granted ? "granted" : "not granted"} · ${esc(summary.warning_count || 0)} warnings · ${esc(summary.tab_switch_count || 0)} tab switches · ${esc(summary.face_not_visible_incidents || 0)} prolonged face warnings · ${summary.flagged_for_review ? "Flagged for Review" : "Not flagged"}</div>${rec ? `<div class="proctoring-compact" style="margin-top:8px;"><strong>Webcam video:</strong> Status: <span class="badge ${rec.recording_status === 'Uploaded' ? 'badge-blue' : ''}">${esc(rec.recording_status)}</span>${rec.duration_seconds ? ` · ${esc(rec.duration_seconds)}s` : ""}${rec.uploaded_at ? ` · Uploaded ${esc(dateLabel(rec.uploaded_at))}` : ""}${state.user.role === 'admin' && rec.has_recording ? ` <button class="btn btn-primary btn-small" data-action="view-recording" data-id="${esc(rec.id)}">▶ Watch recording</button>` : ""}</div>` : ""}${review.events.length ? `<div class="table-wrap"><table><thead><tr><th>Date/time</th><th>Event</th><th>Severity</th><th>Description</th><th>Warning</th><th>Duration</th></tr></thead><tbody>${review.events.map(item => `<tr><td>${esc(new Date(item.occurred_at).toLocaleString())}</td><td>${esc(item.event_type.replaceAll("_", " "))}</td><td><span class="badge ${item.severity === "High" ? "badge-red" : item.severity === "Warning" ? "badge-blue" : ""}">${esc(item.severity)}</span></td><td>${esc(item.message)}</td><td>${item.warning_number == null ? "—" : esc(item.warning_number)}</td><td>${item.duration_seconds == null ? "—" : `${esc(item.duration_seconds)}s`}</td></tr>`).join("")}</tbody></table></div>` : empty("No proctoring events recorded", "No camera or browser activity events were recorded for this assessment.")}</section>`;
+}
+
+function renderRecordingModal() {
+  const rec = state.activeRecording;
+  if (!rec) return "";
+  const mins = rec.duration_seconds ? `${Math.floor(rec.duration_seconds / 60)}m ${rec.duration_seconds % 60}s` : "—";
+  const sizeMb = rec.file_size_bytes ? `${(rec.file_size_bytes / (1024 * 1024)).toFixed(1)} MB` : "—";
+  return `
+    <div class="modal-backdrop" data-action="close-recording-modal">
+      <div class="modal-card" style="max-width: 720px; width: 95%;">
+        <div class="card-heading">
+          <div>
+            <span class="eyebrow">Admin video playback</span>
+            <h2>Assessment #${esc(rec.assessment_id)} webcam recording</h2>
+            <p>Signed expiring playback link (${mins} · ${sizeMb} · ${esc(rec.format || "webm")})</p>
+          </div>
+          <button class="icon-button" data-action="close-recording-modal" aria-label="Close recording">×</button>
+        </div>
+        <div style="margin: 16px 0; background: #000; border-radius: 8px; overflow: hidden; display: flex; justify-content: center; align-items: center; min-height: 240px;">
+          ${rec.playback_url ? `
+            <video controls autoplay playsinline style="width: 100%; max-height: 440px;" src="${esc(rec.playback_url)}">
+              Your browser does not support HTML5 video.
+            </video>
+          ` : `
+            <div style="color: #aaa; padding: 32px; text-align: center;">
+              <p>No video playback stream is available for this recording.</p>
+              <small>Cloudinary credentials may have been unconfigured at upload time.</small>
+            </div>
+          `}
+        </div>
+        <div class="modal-actions" style="display: flex; justify-content: space-between; align-items: center;">
+          <small class="muted">Access logged for security audit. Link expires in 60 minutes.</small>
+          <button class="btn btn-quiet" data-action="close-recording-modal">Close</button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function proctoringPage() {
   const data = state.proctoringData || { summary: {}, items: [], jobs: [], recruiters: [], top_candidates: [], recent_activity: [] };
   const summary = data.summary;
   const filters = state.proctoringFilters;
-  return `${heading("Assessment integrity", "Proctoring", "Review consented camera status, face-presence warnings, and browser activity. Video is not stored.")}<section class="card"><div class="filters assessment-filters"><select class="select" id="proctoring-filter-job"><option value="">All jobs</option>${data.jobs.map(job => `<option value="${esc(job.id)}" ${String(filters.job_id || "") === String(job.id) ? "selected" : ""}>${esc(job.title)}</option>`).join("")}</select><select class="select" id="proctoring-filter-recruiter"><option value="">All recruiters</option>${data.recruiters.map(recruiter => `<option value="${esc(recruiter.id)}" ${String(filters.recruiter_id || "") === String(recruiter.id) ? "selected" : ""}>${esc(recruiter.name)}</option>`).join("")}</select><input class="input" id="proctoring-filter-candidate" value="${esc(filters.candidate || "")}" placeholder="Candidate name or email" /><input class="input" type="date" id="proctoring-filter-start" value="${esc(filters.start_date || "")}" aria-label="Activity from date" /><input class="input" type="date" id="proctoring-filter-end" value="${esc(filters.end_date || "")}" aria-label="Activity through date" /><select class="select" id="proctoring-filter-status"><option value="">All assessment states</option>${["Not Sent", "Sent", "Started", "Completed", "Expired"].map(status => `<option ${filters.assessment_status === status ? "selected" : ""}>${status}</option>`).join("")}</select><select class="select" id="proctoring-filter-flagged"><option value="" ${filters.flagged == null ? "selected" : ""}>Flagged and unflagged</option><option value="true" ${filters.flagged === "true" ? "selected" : ""}>Flagged only</option><option value="false" ${filters.flagged === "false" ? "selected" : ""}>Not flagged</option></select><button class="btn btn-quiet" data-action="filter-proctoring">Apply filters</button></div></section><section class="grid stats-grid admin-weekly-cards">${stat("Proctored assessments", summary.proctored_assessments ?? 0, "Matching filters", "fileCheck")}${stat("Camera denied", summary.camera_permission_denied_assessments ?? 0, "Matching filters", "users")}${stat("Flagged for review", summary.flagged_assessments ?? 0, "Matching filters", "sparkles")}${stat("Tab switches", summary.tab_switch_events ?? 0, "Recorded hidden-page events", "clock")}${stat("Prolonged face warnings", summary.face_not_visible_warnings ?? 0, "At or above configured threshold", "user")}</section><section class="card"><div class="card-heading"><div><h2>Assessment integrity records</h2><p>${data.items.length} assessment record${data.items.length === 1 ? "" : "s"} shown (up to 200)</p></div></div>${data.items.length ? `<div class="table-wrap"><table><thead><tr><th>Candidate</th><th>Job / Recruiter</th><th>Assessment</th><th>Camera</th><th>Warnings</th><th>Flagged</th><th>Completed</th><th>Timeline</th></tr></thead><tbody>${data.items.map(item => `<tr><td><strong>${esc(item.candidate_name)}</strong><small>${esc(item.candidate_email)}</small></td><td>${esc(item.job_title)}<small>${esc(item.recruiter_name)}</small></td><td>${esc(item.assessment_status)}</td><td>${item.camera_permission_granted ? "Granted" : "Not granted"}</td><td>${esc(item.warning_count)}</td><td>${item.flagged_for_review ? `<span class="badge badge-red">Flagged for Review</span>` : "No"}</td><td>${item.submitted_at ? esc(dateLabel(item.submitted_at)) : "—"}</td><td><button class="text-button" data-action="review-proctoring" data-id="${esc(item.assessment_id)}">View timeline</button></td></tr>`).join("")}</tbody></table></div>` : empty("No proctored assessments", "Matching assessment records will appear here.")}</section><section class="grid admin-analytics-columns"><article class="card"><div class="card-heading"><div><h2>Highest warning counts</h2><p>Filtered candidates, ordered by maximum assessment warning count</p></div></div>${data.top_candidates.length ? data.top_candidates.map(item => `<div class="breakdown-row"><span>${esc(item.candidate_name)} · ${esc(item.candidate_email)}</span><strong>${esc(item.warning_count)} warnings</strong></div>`).join("") : `<p class="muted">No warning activity in this filter.</p>`}</article><article class="card"><div class="card-heading"><div><h2>Recent suspicious activity</h2><p>Latest recorded events</p></div></div>${data.recent_activity.length ? data.recent_activity.map(item => `<div class="application-row"><div><strong>${esc(item.candidate_name)} · ${esc(item.event_type.replaceAll("_", " "))}</strong><small>${esc(item.job_title)} · ${esc(new Date(item.occurred_at).toLocaleString())}${item.duration_seconds == null ? "" : ` · ${esc(item.duration_seconds)}s`}</small></div><button class="text-button" data-action="review-proctoring" data-id="${esc(item.assessment_id)}">Timeline</button></div>`).join("") : `<p class="muted">No recent events in this filter.</p>`}</article></section>${state.proctoringReview ? renderProctoringReview() : ""}`;
+  return `${heading("Assessment integrity", "Proctoring", "Review consented camera status, face-presence warnings, browser activity, and recorded webcam playback (admin-only).")}<section class="card"><div class="filters assessment-filters"><select class="select" id="proctoring-filter-job"><option value="">All jobs</option>${data.jobs.map(job => `<option value="${esc(job.id)}" ${String(filters.job_id || "") === String(job.id) ? "selected" : ""}>${esc(job.title)}</option>`).join("")}</select><select class="select" id="proctoring-filter-recruiter"><option value="">All recruiters</option>${data.recruiters.map(recruiter => `<option value="${esc(recruiter.id)}" ${String(filters.recruiter_id || "") === String(recruiter.id) ? "selected" : ""}>${esc(recruiter.name)}</option>`).join("")}</select><input class="input" id="proctoring-filter-candidate" value="${esc(filters.candidate || "")}" placeholder="Candidate name or email" /><input class="input" type="date" id="proctoring-filter-start" value="${esc(filters.start_date || "")}" aria-label="Activity from date" /><input class="input" type="date" id="proctoring-filter-end" value="${esc(filters.end_date || "")}" aria-label="Activity through date" /><select class="select" id="proctoring-filter-status"><option value="">All assessment states</option>${["Not Sent", "Sent", "Started", "Completed", "Expired"].map(status => `<option ${filters.assessment_status === status ? "selected" : ""}>${status}</option>`).join("")}</select><select class="select" id="proctoring-filter-flagged"><option value="" ${filters.flagged == null ? "selected" : ""}>Flagged and unflagged</option><option value="true" ${filters.flagged === "true" ? "selected" : ""}>Flagged only</option><option value="false" ${filters.flagged === "false" ? "selected" : ""}>Not flagged</option></select><button class="btn btn-quiet" data-action="filter-proctoring">Apply filters</button></div></section><section class="grid stats-grid admin-weekly-cards">${stat("Proctored assessments", summary.proctored_assessments ?? 0, "Matching filters", "fileCheck")}${stat("Camera denied", summary.camera_permission_denied_assessments ?? 0, "Matching filters", "users")}${stat("Flagged for review", summary.flagged_assessments ?? 0, "Matching filters", "sparkles")}${stat("Recordings uploaded", summary.total_recordings ?? 0, "Secure video captures", "fileCheck")}${stat("Upload failures", summary.upload_failures ?? 0, "Failed recordings", "clock")}${stat("Tab switches", summary.tab_switch_events ?? 0, "Recorded hidden-page events", "clock")}${stat("Prolonged face warnings", summary.face_not_visible_warnings ?? 0, "At or above configured threshold", "user")}</section><section class="card"><div class="card-heading"><div><h2>Assessment integrity records</h2><p>${data.items.length} assessment record${data.items.length === 1 ? "" : "s"} shown (up to 200)</p></div></div>${data.items.length ? `<div class="table-wrap"><table><thead><tr><th>Candidate</th><th>Job / Recruiter</th><th>Assessment</th><th>Camera</th><th>Warnings</th><th>Flagged</th><th>Recording</th><th>Completed</th><th>Timeline</th></tr></thead><tbody>${data.items.map(item => `<tr><td><strong>${esc(item.candidate_name)}</strong><small>${esc(item.candidate_email)}</small></td><td>${esc(item.job_title)}<small>${esc(item.recruiter_name)}</small></td><td>${esc(item.assessment_status)}</td><td>${item.camera_permission_granted ? "Granted" : "Not granted"}</td><td>${esc(item.warning_count)}</td><td>${item.flagged_for_review ? `<span class="badge badge-red">Flagged for Review</span>` : "No"}</td><td>${item.has_recording ? `<button class="btn btn-quiet btn-small" data-action="view-recording" data-id="${esc(item.recording_id)}">▶ Play (${item.recording_duration ? `${item.recording_duration}s` : "video"})</button>` : item.recording_status === "Failed" ? `<span class="badge badge-red">Failed</span>` : item.recording_status === "Pending" ? `<span class="badge">Pending</span>` : "—"}</td><td>${item.submitted_at ? esc(dateLabel(item.submitted_at)) : "—"}</td><td><button class="text-button" data-action="review-proctoring" data-id="${esc(item.assessment_id)}">View timeline</button></td></tr>`).join("")}</tbody></table></div>` : empty("No proctored assessments", "Matching assessment records will appear here.")}</section><section class="grid admin-analytics-columns"><article class="card"><div class="card-heading"><div><h2>Highest warning counts</h2><p>Filtered candidates, ordered by maximum assessment warning count</p></div></div>${data.top_candidates.length ? data.top_candidates.map(item => `<div class="breakdown-row"><span>${esc(item.candidate_name)} · ${esc(item.candidate_email)}</span><strong>${esc(item.warning_count)} warnings</strong></div>`).join("") : `<p class="muted">No warning activity in this filter.</p>`}</article><article class="card"><div class="card-heading"><div><h2>Recent suspicious activity</h2><p>Latest recorded events</p></div></div>${data.recent_activity.length ? data.recent_activity.map(item => `<div class="application-row"><div><strong>${esc(item.candidate_name)} · ${esc(item.event_type.replaceAll("_", " "))}</strong><small>${esc(item.job_title)} · ${esc(new Date(item.occurred_at).toLocaleString())}${item.duration_seconds == null ? "" : ` · ${esc(item.duration_seconds)}s`}</small></div><button class="text-button" data-action="review-proctoring" data-id="${esc(item.assessment_id)}">Timeline</button></div>`).join("") : `<p class="muted">No recent events in this filter.</p>`}</article></section>${state.proctoringReview ? renderProctoringReview() : ""}${state.activeRecording ? renderRecordingModal() : ""}`;
 }
 
 function notificationsPage() {
@@ -806,6 +852,14 @@ async function openProctoringReview(id) {
   } catch (error) { showToast(error.message, true); }
 }
 
+async function openRecordingPlayback(id) {
+  try {
+    const data = await api(`/admin/recordings/${encodeURIComponent(id)}/playback`);
+    state.activeRecording = data;
+    renderWorkspace();
+  } catch (error) { showToast(error.message, true); }
+}
+
 function renderWorkspace() {
   if (!state.user) return;
   shell(currentContent());
@@ -1014,13 +1068,14 @@ async function applyToJob(id) {
 }
 
 async function downloadPrivateResume(path, filenameFallback) {
-  const headers = new Headers({ Authorization: `Bearer ${state.token}` });
+  const headers = new Headers();
+  if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
   try {
-    const response = await fetch(`${API}${path}`, { headers });
+    const response = await fetch(`${API}${path}`, { headers, credentials: "same-origin" });
     if (!response.ok) {
       let payload = {};
       try { payload = await response.json(); } catch { payload = {}; }
-      throw new Error(payload.detail || `Resume download failed (${response.status})`);
+      throw new Error(formatDetail(payload.detail, `Resume download failed (${response.status})`));
     }
     const disposition = response.headers.get("Content-Disposition") || "";
     const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || filenameFallback;
@@ -1464,6 +1519,13 @@ app.addEventListener("click", async event => {
   if (target.dataset.action === "close-assessment-review") { state.assessmentReview = null; renderWorkspace(); return; }
   if (target.dataset.action === "review-proctoring") { await openProctoringReview(target.dataset.id); return; }
   if (target.dataset.action === "close-proctoring-review") { state.proctoringReview = null; renderWorkspace(); return; }
+  if (target.dataset.action === "view-recording") { await openRecordingPlayback(target.dataset.id); return; }
+  if (target.dataset.action === "close-recording-modal") {
+    if (target.classList.contains("modal-backdrop") && event.target !== target) return;
+    state.activeRecording = null;
+    renderWorkspace();
+    return;
+  }
   if (target.dataset.action === "save-note") {
     const note = document.querySelector(`[data-note="${CSS.escape(target.dataset.id)}"]`)?.value || "";
     try {

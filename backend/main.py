@@ -25,7 +25,7 @@ from backend.email_service import (
     send_interview_email,
     send_notification_email,
 )
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -68,10 +68,19 @@ if IS_PRODUCTION:
 TOKEN_SECRET = TOKEN_SECRET or DEFAULT_SECRET
 TOKEN_TTL_SECONDS = 60 * 60 * 12
 
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "SKILLSPHERE_ALLOWED_ORIGINS",
+        "http://127.0.0.1:8000,http://localhost:8000"
+    ).split(",")
+    if origin.strip()
+]
+
 app = FastAPI(title="SkillSphere API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -91,7 +100,7 @@ async def security_middleware(request: Request, call_next):
             return JSONResponse({"detail": "CSRF token is required for cookie-authenticated requests."}, status_code=403)
         response = await call_next(request)
 
-    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://cdn.jsdelivr.net https://storage.googleapis.com; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://res.cloudinary.com; font-src 'self' data: https://fonts.gstatic.com; media-src 'self' blob: data: https://res.cloudinary.com; connect-src 'self' https://cdn.jsdelivr.net https://storage.googleapis.com https://res.cloudinary.com https://api.cloudinary.com; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -171,6 +180,106 @@ def auto_submit_on_max_proctoring_warnings() -> bool:
     return value == "true"
 
 
+def recording_required() -> bool:
+    if not proctoring_required():
+        return False
+    value = os.environ.get("SKILLSPHERE_RECORDING_REQUIRED", "true").strip().lower()
+    return value == "true"
+
+
+def recording_max_upload_bytes() -> int:
+    try:
+        mb = int(os.environ.get("SKILLSPHERE_RECORDING_MAX_UPLOAD_MB", "100"))
+    except ValueError:
+        mb = 100
+    return max(1, mb) * 1024 * 1024
+
+
+def recording_retention_days() -> int:
+    try:
+        days = int(os.environ.get("SKILLSPHERE_RECORDING_RETENTION_DAYS", "90"))
+    except ValueError:
+        days = 90
+    return max(1, days)
+
+
+def cloudinary_configured() -> bool:
+    enabled = os.environ.get("SKILLSPHERE_CLOUDINARY_ENABLED", "true").strip().lower() == "true"
+    cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME", "").strip()
+    api_key = os.environ.get("CLOUDINARY_API_KEY", "").strip()
+    api_secret = os.environ.get("CLOUDINARY_API_SECRET", "").strip()
+    return bool(enabled and cloud_name and api_key and api_secret)
+
+
+def get_cloudinary_config() -> dict[str, str]:
+    return {
+        "cloud_name": os.environ.get("CLOUDINARY_CLOUD_NAME", "").strip(),
+        "api_key": os.environ.get("CLOUDINARY_API_KEY", "").strip(),
+        "api_secret": os.environ.get("CLOUDINARY_API_SECRET", "").strip(),
+        "folder": os.environ.get("CLOUDINARY_UPLOAD_FOLDER", "skillsphere/assessment-recordings").strip(),
+    }
+
+
+def upload_video_to_cloudinary(
+    content: bytes,
+    public_id: str,
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    if not cloudinary_configured():
+        raise RuntimeError("Cloudinary is not configured or disabled.")
+    import cloudinary
+    import cloudinary.uploader
+
+    config = get_cloudinary_config()
+    cloudinary.config(
+        cloud_name=config["cloud_name"],
+        api_key=config["api_key"],
+        api_secret=config["api_secret"],
+        secure=True,
+    )
+    folder = config["folder"]
+    full_public_id = f"{folder}/{public_id}".strip("/")
+    return cloudinary.uploader.upload(
+        content,
+        resource_type="video",
+        public_id=full_public_id,
+        tags=tags or ["skillsphere", "proctoring"],
+        type="authenticated",
+        overwrite=True,
+    )
+
+
+def generate_signed_playback_url(
+    public_id: str,
+    resource_type: str = "video",
+    format: str | None = None,
+    expires_in_seconds: int = 3600,
+) -> str:
+    if not cloudinary_configured():
+        return f"https://res.cloudinary.com/demo/video/upload/{public_id}.mp4"
+    import cloudinary
+    import cloudinary.utils
+
+    config = get_cloudinary_config()
+    cloudinary.config(
+        cloud_name=config["cloud_name"],
+        api_key=config["api_key"],
+        api_secret=config["api_secret"],
+        secure=True,
+    )
+    expires_at = int(time.time()) + expires_in_seconds
+    url, _ = cloudinary.utils.cloudinary_url(
+        public_id,
+        resource_type=resource_type,
+        type="authenticated",
+        format=format,
+        sign_url=True,
+        expires_at=expires_at,
+        secure=True,
+    )
+    return url
+
+
 def round1_pass_percentage() -> float:
     try:
         percentage = float(os.environ.get("SKILLSPHERE_ROUND1_PASS_PERCENTAGE", "75"))
@@ -194,9 +303,12 @@ def now() -> str:
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH, timeout=10)
+    connection = sqlite3.connect(DB_PATH, timeout=15)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = NORMAL")
+    connection.execute("PRAGMA busy_timeout = 5000")
     try:
         yield connection
         connection.commit()
@@ -279,22 +391,36 @@ def decode_token(token: str) -> dict[str, Any]:
 
 
 RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
+LAST_RATE_LIMIT_CLEANUP: float = 0.0
+TRUSTED_PROXIES = {
+    ip.strip()
+    for ip in os.environ.get("SKILLSPHERE_TRUSTED_PROXIES", "127.0.0.1,::1,testclient").split(",")
+    if ip.strip()
+}
 
 
 def client_ip(request: Request) -> str:
+    peer_host = request.client.host if request.client else "unknown"
     forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
+    if forwarded and (peer_host in TRUSTED_PROXIES or not current_is_production()):
         candidate = forwarded.split(",", 1)[0].strip()
         if candidate:
             return candidate
-    if request.client:
-        return request.client.host
-    return "unknown"
+    return peer_host
 
 
 def enforce_rate_limit(scope: str, identifier: str, limit: int, window_seconds: int) -> None:
+    global LAST_RATE_LIMIT_CLEANUP
     key = f"{scope}:{identifier}"
     now = time.monotonic()
+    if now - LAST_RATE_LIMIT_CLEANUP > 60:
+        LAST_RATE_LIMIT_CLEANUP = now
+        stale_keys = [
+            k for k, timestamps in RATE_LIMIT_BUCKETS.items()
+            if not timestamps or (now - timestamps[-1] >= window_seconds)
+        ]
+        for k in stale_keys:
+            RATE_LIMIT_BUCKETS.pop(k, None)
     bucket = RATE_LIMIT_BUCKETS.setdefault(key, [])
     bucket[:] = [timestamp for timestamp in bucket if now - timestamp < window_seconds]
     if len(bucket) >= limit:
@@ -472,6 +598,16 @@ class ProctoringStartBody(BaseModel):
 class ProctoringEventBody(BaseModel):
     event_type: str = Field(min_length=1, max_length=50)
     duration_seconds: int | None = Field(default=None, ge=0, le=3600)
+
+
+class RecordingStartBody(BaseModel):
+    consent_given: bool
+    consent_version: str = Field(default="1.0", max_length=20)
+
+
+class RecordingCompleteBody(BaseModel):
+    duration_seconds: int | None = Field(default=None, ge=0)
+    status: str = Field(default="Uploaded", max_length=30)
 
 
 def initialize_database() -> None:
@@ -671,6 +807,35 @@ def initialize_database() -> None:
                 ON assessment_proctoring_events(event_type, occurred_at);
             CREATE INDEX IF NOT EXISTS assessments_candidate_idx ON assessments(candidate_id, status);
             CREATE INDEX IF NOT EXISTS assessments_job_idx ON assessments(job_id, status);
+            CREATE TABLE IF NOT EXISTS assessment_recordings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assessment_id INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+                application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+                candidate_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                cloudinary_public_id TEXT,
+                cloudinary_asset_id TEXT,
+                cloudinary_resource_type TEXT NOT NULL DEFAULT 'video',
+                secure_url TEXT,
+                duration_seconds INTEGER,
+                file_size_bytes INTEGER,
+                format TEXT,
+                recording_status TEXT NOT NULL DEFAULT 'Pending'
+                    CHECK(recording_status IN ('Pending', 'Uploading', 'Uploaded', 'Failed', 'Partial', 'Expired')),
+                upload_error TEXT,
+                started_at TEXT,
+                ended_at TEXT,
+                uploaded_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS assessment_recordings_assessment_idx ON assessment_recordings(assessment_id);
+            CREATE INDEX IF NOT EXISTS assessment_recordings_candidate_idx ON assessment_recordings(candidate_id, created_at);
+            CREATE TABLE IF NOT EXISTS admin_recording_access_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recording_id INTEGER NOT NULL REFERENCES assessment_recordings(id) ON DELETE CASCADE,
+                admin_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                accessed_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS interviews (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
@@ -791,6 +956,12 @@ def initialize_database() -> None:
             ("flagged_at", "TEXT"),
             ("camera_permission_granted_at", "TEXT"),
             ("last_face_detected_at", "TEXT"),
+            ("recording_required", "INTEGER NOT NULL DEFAULT 1"),
+            ("recording_consent_given_at", "TEXT"),
+            ("recording_consent_version", "TEXT DEFAULT '1.0'"),
+            ("recording_status", "TEXT NOT NULL DEFAULT 'Pending'"),
+            ("recording_failure_reason", "TEXT"),
+            ("recording_available_at", "TEXT"),
         ):
             if column not in assessment_columns:
                 db.execute(f"ALTER TABLE assessments ADD COLUMN {column} {definition}")
@@ -803,6 +974,12 @@ def initialize_database() -> None:
             )
         db.execute(
             "CREATE INDEX IF NOT EXISTS question_bank_imports_job_idx ON question_bank_imports(job_id, created_at)"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS applications_job_status_idx ON applications(job_id, status)"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS jobs_recruiter_status_idx ON jobs(recruiter_id, status)"
         )
         assessment_question_columns = {
             row["name"] for row in db.execute("PRAGMA table_info(assessment_questions)")
@@ -1117,6 +1294,14 @@ def record_application_status(
     )
 
 
+def skill_matches(skill: str, text: str) -> bool:
+    clean = skill.strip()
+    if not clean:
+        return False
+    pattern = rf"(?<!\w){re.escape(clean)}(?!\w)"
+    return bool(re.search(pattern, text, re.IGNORECASE))
+
+
 def calculate_match(
     required_skills: list[str],
     extracted_text: str,
@@ -1132,8 +1317,8 @@ def calculate_match(
     if not isinstance(saved_skills, list) or not all(isinstance(skill, str) for skill in saved_skills):
         raise HTTPException(status_code=422, detail="Profile skills must be a list of text values")
     candidate_text = f"{extracted_text} {' '.join([*extracted_skills, *saved_skills])}".lower()
-    matched = [skill for skill in required_skills if skill.lower() in candidate_text]
-    missing = [skill for skill in required_skills if skill.lower() not in candidate_text]
+    matched = [skill for skill in required_skills if skill_matches(skill, candidate_text)]
+    missing = [skill for skill in required_skills if not skill_matches(skill, candidate_text)]
     percentage = round(len(matched) / len(required_skills) * 100) if required_skills else 0
     return {
         "match_percentage": percentage,
@@ -1642,13 +1827,13 @@ def send_assessment_invitation(application_id: int, selected_topic: str | None =
                 """INSERT INTO assessments
                 (application_id, candidate_id, job_id, technology, token_hash, status,
                 match_percentage, expires_at, total_questions, assessment_name, assessment_round,
-                pass_percentage, duration_minutes, selection_reasoning, proctoring_required, created_at)
-                VALUES (?, ?, ?, ?, ?, 'Not Sent', ?, ?, 20, ?, 'Round 1', ?, ?, ?, ?, ?)""",
+                pass_percentage, duration_minutes, selection_reasoning, proctoring_required, recording_required, created_at)
+                VALUES (?, ?, ?, ?, ?, 'Not Sent', ?, ?, 20, ?, 'Round 1', ?, ?, ?, ?, ?, ?)""",
                 (
                     application_id, candidate["candidate_id"], candidate["job_id"], technology,
                     hashlib.sha256(token.encode()).hexdigest(), match["match_percentage"],
                     expires_at, ROUND1_ASSESSMENT_NAME, pass_percentage, duration_minutes,
-                    reasoning, int(requires_proctoring), created_at,
+                    reasoning, int(requires_proctoring), int(recording_required()), created_at,
                 ),
             )
             assessment_id = cursor.lastrowid
@@ -1866,7 +2051,7 @@ def detect_profile(text: str) -> dict[str, Any]:
         "leadership", "machine learning", "java", "aws", "docker",
     )
     lower = text.lower()
-    skills = [skill.title() for skill in known_skills if skill in lower]
+    skills = [skill.title() for skill in known_skills if skill_matches(skill, lower)]
     return {
         "name": name or "",
         "email": email.group(0) if email else "",
@@ -1978,19 +2163,28 @@ def extract_resume_text(content: bytes, content_type: str) -> str:
         import pytesseract
 
         document = pdfium.PdfDocument(content)
-        pages = []
-        for index in range(len(document)):
-            image = document[index].render(scale=1.5).to_pil()
-            pages.append(pytesseract.image_to_string(image))
-        return "\n".join(pages).strip()
+        try:
+            pages = []
+            max_ocr_pages = min(len(document), 10)
+            for index in range(max_ocr_pages):
+                image = document[index].render(scale=1.5).to_pil()
+                try:
+                    pages.append(pytesseract.image_to_string(image))
+                finally:
+                    if hasattr(image, "close"):
+                        image.close()
+            return "\n".join(pages).strip()
+        finally:
+            document.close()
     from PIL import Image
     import io
     import pytesseract
 
     try:
-        image = Image.open(io.BytesIO(content))
-        image.verify()
-        image = Image.open(io.BytesIO(content)).convert("RGB")
+        with Image.open(io.BytesIO(content)) as raw_image:
+            raw_image.verify()
+        with Image.open(io.BytesIO(content)).convert("RGB") as image:
+            return pytesseract.image_to_string(image).strip()
     except Exception as error:
         raise HTTPException(status_code=422, detail="This image is unreadable or corrupted. Please check the file and try again.") from error
     return pytesseract.image_to_string(image).strip()
@@ -3416,9 +3610,26 @@ def review_assessment_proctoring(
             ORDER BY occurred_at, id""",
             (assessment_id,),
         ).fetchall()
+        recording_row = db.execute(
+            """SELECT id, recording_status, duration_seconds, file_size_bytes, format,
+                      started_at, ended_at, uploaded_at, upload_error
+            FROM assessment_recordings WHERE assessment_id = ? ORDER BY id DESC LIMIT 1""",
+            (assessment_id,),
+        ).fetchone()
     return {
         "assessment_id": assessment_id,
         "summary": summary,
+        "recording": {
+            "id": recording_row["id"],
+            "recording_status": recording_row["recording_status"],
+            "duration_seconds": recording_row["duration_seconds"],
+            "file_size_bytes": recording_row["file_size_bytes"],
+            "format": recording_row["format"],
+            "started_at": recording_row["started_at"],
+            "ended_at": recording_row["ended_at"],
+            "uploaded_at": recording_row["uploaded_at"],
+            "has_recording": bool(recording_row["recording_status"] == "Uploaded"),
+        } if recording_row else None,
         "events": [
             {
                 "event_type": row["event_type"],
@@ -3503,12 +3714,16 @@ def admin_proctoring(
             assessment.flagged_for_review, assessment.flagged_at,
             assessment.camera_permission_granted_at, assessment.submitted_at,
             assessment.created_at, candidate.name AS candidate_name, candidate.email AS candidate_email,
-            job.title AS job_title, job.recruiter_id, recruiter.name AS recruiter_name
+            job.title AS job_title, job.recruiter_id, recruiter.name AS recruiter_name,
+            assessment.recording_required, assessment.recording_status,
+            recording.id AS recording_id, recording.duration_seconds AS recording_duration,
+            recording.file_size_bytes AS recording_file_size, recording.format AS recording_format
             FROM assessments assessment
             JOIN applications application ON application.id = assessment.application_id
             JOIN users candidate ON candidate.id = assessment.candidate_id
             JOIN jobs job ON job.id = assessment.job_id
             JOIN users recruiter ON recruiter.id = job.recruiter_id
+            LEFT JOIN assessment_recordings recording ON recording.assessment_id = assessment.id
             {where}
             ORDER BY assessment.flagged_for_review DESC, assessment.created_at DESC
             LIMIT 200""",
@@ -3571,6 +3786,13 @@ def admin_proctoring(
         recruiter_filters = db.execute(
             "SELECT id, name FROM users WHERE role = 'recruiter' ORDER BY name"
         ).fetchall()
+        recording_stats = db.execute(
+            """SELECT
+            COUNT(CASE WHEN recording_status = 'Uploaded' THEN 1 END) AS total_recordings,
+            COUNT(CASE WHEN recording_status = 'Failed' THEN 1 END) AS upload_failures,
+            COUNT(CASE WHEN recording_status = 'Pending' THEN 1 END) AS uploads_pending
+            FROM assessment_recordings"""
+        ).fetchone()
     return {
         "summary": {
             "proctored_assessments": summary["proctored_assessments"] or 0,
@@ -3578,6 +3800,9 @@ def admin_proctoring(
             "flagged_assessments": summary["flagged_assessments"] or 0,
             "tab_switch_events": summary["tab_switches"] or 0,
             "face_not_visible_warnings": summary["face_warnings"] or 0,
+            "total_recordings": recording_stats["total_recordings"] or 0,
+            "upload_failures": recording_stats["upload_failures"] or 0,
+            "uploads_pending": recording_stats["uploads_pending"] or 0,
         },
         "items": [
             {
@@ -3597,6 +3822,12 @@ def admin_proctoring(
                 "camera_permission_granted": bool(row["camera_permission_granted_at"]),
                 "submitted_at": row["submitted_at"],
                 "created_at": row["created_at"],
+                "recording_required": bool(row["recording_required"]),
+                "recording_status": row["recording_status"],
+                "recording_id": row["recording_id"],
+                "recording_duration": row["recording_duration"],
+                "recording_file_size": row["recording_file_size"],
+                "has_recording": bool(row["recording_id"] and row["recording_status"] == "Uploaded"),
             }
             for row in assessments
         ],
@@ -3849,7 +4080,330 @@ def get_proctoring_status(token: str) -> dict[str, Any]:
         "max_warnings": max_proctoring_warnings(),
         "face_missing_warning_seconds": proctoring_face_missing_seconds(),
         "flagged_for_review": bool(assessment["flagged_for_review"]),
+        "recording_required": bool(assessment["recording_required"]),
+        "recording_status": assessment["recording_status"],
+        "recording_consent_given": bool(assessment["recording_consent_given_at"]),
     }
+
+
+@app.post("/api/assessments/{token}/recording/start")
+def start_assessment_recording(token: str, body: RecordingStartBody) -> dict[str, Any]:
+    assessment = assessment_from_token(token)
+    if not body.consent_given:
+        raise HTTPException(status_code=422, detail="Candidate consent is required for webcam recording.")
+    if assessment["status"] not in {"Sent", "Started"}:
+        raise HTTPException(status_code=409, detail="This assessment is no longer active.")
+    with connect() as db:
+        now_iso = now()
+        db.execute(
+            """UPDATE assessments
+               SET recording_consent_given_at = COALESCE(recording_consent_given_at, ?),
+                   recording_consent_version = ?,
+                   recording_status = 'Pending'
+               WHERE id = ?""",
+            (now_iso, body.consent_version, assessment["id"]),
+        )
+        existing = db.execute(
+            "SELECT id FROM assessment_recordings WHERE assessment_id = ?",
+            (assessment["id"],),
+        ).fetchone()
+        if not existing:
+            db.execute(
+                """INSERT INTO assessment_recordings (
+                    assessment_id, application_id, candidate_id, recording_status,
+                    started_at, created_at, updated_at
+                ) VALUES (?, ?, ?, 'Pending', ?, ?, ?)""",
+                (
+                    assessment["id"],
+                    assessment["application_id"],
+                    assessment["candidate_id"],
+                    now_iso,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+        else:
+            db.execute(
+                "UPDATE assessment_recordings SET updated_at = ? WHERE id = ?",
+                (now_iso, existing["id"]),
+            )
+    return {
+        "consent_recorded": True,
+        "recording_required": bool(assessment["recording_required"]),
+        "status": "Pending",
+    }
+
+
+@app.post("/api/assessments/{token}/recording/upload")
+def upload_assessment_recording(
+    token: str,
+    file: UploadFile = File(...),
+    duration_seconds: int | None = Form(None),
+) -> dict[str, Any]:
+    assessment = assessment_from_token(token, allow_started_timeout=True)
+    content = file.file.read()
+    max_bytes = recording_max_upload_bytes()
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Recording file size ({len(content)} bytes) exceeds the maximum allowed limit of {max_bytes} bytes.",
+        )
+
+    now_iso = now()
+    content_format = "webm"
+    if file.filename and "." in file.filename:
+        ext = file.filename.rsplit(".", 1)[-1].lower()
+        if ext in {"webm", "mp4", "mkv", "mov"}:
+            content_format = ext
+
+    upload_error = None
+    upload_result = None
+    public_id = f"skillsphere/recordings/assessment_{assessment['id']}_{int(datetime.now(timezone.utc).timestamp())}"
+
+    if cloudinary_configured():
+        try:
+            upload_result = upload_video_to_cloudinary(
+                content,
+                public_id=public_id,
+                tags=[f"assessment_{assessment['id']}", f"candidate_{assessment['candidate_id']}", "skillsphere_proctoring"],
+            )
+        except Exception as exc:
+            upload_error = str(exc)
+            notify_admins(
+                "recording_upload_failed",
+                "Assessment recording upload failed",
+                f"Webcam recording upload failed for assessment #{assessment['id']}: {upload_error}",
+                "/",
+            )
+    else:
+        upload_result = {
+            "public_id": public_id,
+            "asset_id": f"mock_asset_{assessment['id']}",
+            "resource_type": "video",
+            "secure_url": "",
+            "duration": duration_seconds or 0,
+            "format": content_format,
+        }
+
+    with connect() as db:
+        existing = db.execute(
+            "SELECT id FROM assessment_recordings WHERE assessment_id = ?",
+            (assessment["id"],),
+        ).fetchone()
+
+        status = "Uploaded" if upload_result and not upload_error else "Failed"
+        effective_duration = (
+            int(upload_result.get("duration") or 0)
+            if upload_result and upload_result.get("duration")
+            else duration_seconds
+        )
+
+        if existing:
+            db.execute(
+                """UPDATE assessment_recordings
+                   SET cloudinary_public_id = ?,
+                       cloudinary_asset_id = ?,
+                       cloudinary_resource_type = ?,
+                       secure_url = ?,
+                       duration_seconds = ?,
+                       file_size_bytes = ?,
+                       format = ?,
+                       recording_status = ?,
+                       upload_error = ?,
+                       ended_at = COALESCE(ended_at, ?),
+                       uploaded_at = ?,
+                       updated_at = ?
+                   WHERE id = ?""",
+                (
+                    upload_result.get("public_id") if upload_result else None,
+                    upload_result.get("asset_id") if upload_result else None,
+                    upload_result.get("resource_type", "video") if upload_result else "video",
+                    upload_result.get("secure_url") if upload_result else None,
+                    effective_duration,
+                    len(content),
+                    upload_result.get("format", content_format) if upload_result else content_format,
+                    status,
+                    upload_error,
+                    now_iso,
+                    now_iso if status == "Uploaded" else None,
+                    now_iso,
+                    existing["id"],
+                ),
+            )
+        else:
+            db.execute(
+                """INSERT INTO assessment_recordings (
+                    assessment_id, application_id, candidate_id, cloudinary_public_id,
+                    cloudinary_asset_id, cloudinary_resource_type, secure_url, duration_seconds,
+                    file_size_bytes, format, recording_status, upload_error, started_at,
+                    ended_at, uploaded_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    assessment["id"],
+                    assessment["application_id"],
+                    assessment["candidate_id"],
+                    upload_result.get("public_id") if upload_result else None,
+                    upload_result.get("asset_id") if upload_result else None,
+                    upload_result.get("resource_type", "video") if upload_result else "video",
+                    upload_result.get("secure_url") if upload_result else None,
+                    effective_duration,
+                    len(content),
+                    upload_result.get("format", content_format) if upload_result else content_format,
+                    status,
+                    upload_error,
+                    now_iso,
+                    now_iso,
+                    now_iso if status == "Uploaded" else None,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+
+        db.execute(
+            """UPDATE assessments
+               SET recording_status = ?,
+                   recording_failure_reason = ?,
+                   recording_available_at = ?
+               WHERE id = ?""",
+            (
+                status,
+                upload_error,
+                now_iso if status == "Uploaded" else None,
+                assessment["id"],
+            ),
+        )
+
+    return {
+        "success": status == "Uploaded",
+        "status": status,
+        "duration_seconds": effective_duration,
+        "file_size_bytes": len(content),
+        "error": upload_error,
+        "non_blocking": True,
+    }
+
+
+@app.post("/api/assessments/{token}/recording/complete")
+def complete_assessment_recording(token: str, body: RecordingCompleteBody) -> dict[str, Any]:
+    assessment = assessment_from_token(token, allow_started_timeout=True)
+    with connect() as db:
+        now_iso = now()
+        db.execute(
+            """UPDATE assessment_recordings
+               SET ended_at = ?,
+                   duration_seconds = COALESCE(?, duration_seconds),
+                   updated_at = ?
+               WHERE assessment_id = ?""",
+            (now_iso, body.duration_seconds, now_iso, assessment["id"]),
+        )
+    return {"completed": True}
+
+
+@app.get("/api/admin/assessments/{assessment_id}/recordings")
+def list_assessment_recordings(
+    assessment_id: int,
+    user: dict[str, Any] = Depends(require_role("admin")),
+) -> list[dict[str, Any]]:
+    del user
+    with connect() as db:
+        rows = db.execute(
+            """SELECT id, assessment_id, application_id, candidate_id, recording_status,
+                      duration_seconds, file_size_bytes, format, upload_error, started_at,
+                      ended_at, uploaded_at, created_at, updated_at
+               FROM assessment_recordings WHERE assessment_id = ?
+               ORDER BY id DESC""",
+            (assessment_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+@app.get("/api/admin/recordings/{recording_id}/playback")
+def get_recording_playback(
+    recording_id: int,
+    user: dict[str, Any] = Depends(require_role("admin")),
+) -> dict[str, Any]:
+    with connect() as db:
+        recording = db.execute(
+            "SELECT * FROM assessment_recordings WHERE id = ?",
+            (recording_id,),
+        ).fetchone()
+        if not recording:
+            raise HTTPException(status_code=404, detail="Assessment recording not found.")
+        if recording["recording_status"] != "Uploaded":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Recording is not ready for playback (status: {recording['recording_status']}).",
+            )
+
+        db.execute(
+            "INSERT INTO admin_recording_access_logs (recording_id, admin_id, accessed_at) VALUES (?, ?, ?)",
+            (recording_id, user["id"], now()),
+        )
+
+        playback_url = ""
+        if cloudinary_configured() and recording["cloudinary_public_id"]:
+            playback_url = generate_signed_playback_url(
+                recording["cloudinary_public_id"],
+                resource_type=recording["cloudinary_resource_type"] or "video",
+                format=recording["format"] or "webm",
+                expires_in_seconds=3600,
+            )
+        elif recording["secure_url"]:
+            playback_url = recording["secure_url"]
+
+        return {
+            "recording_id": recording["id"],
+            "assessment_id": recording["assessment_id"],
+            "playback_url": playback_url,
+            "expires_in_seconds": 3600,
+            "duration_seconds": recording["duration_seconds"],
+            "format": recording["format"],
+            "file_size_bytes": recording["file_size_bytes"],
+            "uploaded_at": recording["uploaded_at"],
+        }
+
+
+@app.post("/api/admin/recordings/cleanup")
+def cleanup_old_recordings(
+    user: dict[str, Any] = Depends(require_role("admin")),
+) -> dict[str, Any]:
+    del user
+    days = recording_retention_days()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cleaned = 0
+    with connect() as db:
+        expired_recordings = db.execute(
+            """SELECT recording.id, recording.cloudinary_public_id, recording.cloudinary_resource_type
+               FROM assessment_recordings recording
+               JOIN assessments assessment ON assessment.id = recording.assessment_id
+               WHERE recording.uploaded_at < ?
+                 AND recording.recording_status = 'Uploaded'
+                 AND assessment.flagged_for_review = 0""",
+            (cutoff,),
+        ).fetchall()
+
+        for rec in expired_recordings:
+            if cloudinary_configured() and rec["cloudinary_public_id"]:
+                try:
+                    import cloudinary.uploader
+                    cloudinary.uploader.destroy(
+                        rec["cloudinary_public_id"],
+                        resource_type=rec["cloudinary_resource_type"] or "video",
+                    )
+                except Exception:
+                    pass
+            db.execute(
+                """UPDATE assessment_recordings
+                   SET recording_status = 'Expired',
+                       secure_url = NULL,
+                       cloudinary_public_id = NULL,
+                       updated_at = ?
+                   WHERE id = ?""",
+                (now(), rec["id"]),
+            )
+            cleaned += 1
+
+    return {"cleaned_count": cleaned, "retention_days": days}
 
 
 @app.get("/api/assessments/{token}")
@@ -3871,6 +4425,9 @@ def get_assessment(token: str) -> dict[str, Any]:
         "started_at": assessment["starts_at"],
         "proctoring_required": bool(assessment["proctoring_required"]),
         "proctoring_status": assessment["proctoring_status"],
+        "recording_required": bool(assessment["recording_required"]),
+        "recording_status": assessment["recording_status"],
+        "recording_consent_given": bool(assessment["recording_consent_given_at"]),
         "questions": questions if assessment["status"] == "Started" and (
             not assessment["proctoring_required"] or assessment["proctoring_status"] == "Active"
         ) else [],
@@ -3887,6 +4444,8 @@ def start_assessment(token: str) -> dict[str, Any]:
             not row["camera_permission_granted_at"] or row["proctoring_status"] != "Active"
         ):
             raise HTTPException(status_code=409, detail="Grant camera permission before starting the assessment.")
+        if row["recording_required"] and recording_required() and not row["recording_consent_given_at"]:
+            raise HTTPException(status_code=409, detail="Consent to webcam recording before starting the assessment.")
         if row["status"] == "Sent":
             started_at = datetime.now(timezone.utc)
             expires_at = min(
@@ -4711,6 +5270,16 @@ async def run_interview_code(
     }
 
 
+def sync_save_interview_code(interview_id: int, code: str) -> None:
+    with connect() as db:
+        db.execute("UPDATE interviews SET code = ? WHERE id = ?", (code, interview_id))
+
+
+def sync_save_interview_language(interview_id: int, language: str) -> None:
+    with connect() as db:
+        db.execute("UPDATE interviews SET language = ? WHERE id = ?", (language, interview_id))
+
+
 @app.websocket("/api/interviews/{interview_id}/code")
 async def interview_code_socket(websocket: WebSocket, interview_id: int) -> None:
     await websocket.accept()
@@ -4747,13 +5316,11 @@ async def interview_code_socket(websocket: WebSocket, interview_id: int) -> None
                 if len(code) > MAX_INTERVIEW_CODE_LENGTH:
                     await websocket.send_json({"type": "error", "message": "Code is limited to 30,000 characters."})
                     continue
-                with connect() as db:
-                    db.execute("UPDATE interviews SET code = ? WHERE id = ?", (code, interview_id))
+                await run_in_threadpool(sync_save_interview_code, interview_id, code)
                 outgoing = {"type": "code", "code": code}
             elif message.get("type") == "language" and message.get("language") in CODE_LANGUAGES:
                 language = message["language"]
-                with connect() as db:
-                    db.execute("UPDATE interviews SET language = ? WHERE id = ?", (language, interview_id))
+                await run_in_threadpool(sync_save_interview_language, interview_id, language)
                 outgoing = {"type": "language", "language": language}
             else:
                 continue
@@ -4854,11 +5421,6 @@ def admin_users(user: dict[str, Any] = Depends(require_role("admin"))) -> dict[s
             FROM users ORDER BY users.created_at DESC LIMIT 500"""
         ).fetchall()
     return {"items": [dict(row) for row in rows]}
-
-
-@app.get("/assessment", include_in_schema=False)
-def assessment_page() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "assessment.html")
 
 
 @app.get("/api/admin/analytics")

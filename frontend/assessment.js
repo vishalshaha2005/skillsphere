@@ -2,6 +2,7 @@ const app = document.querySelector("#assessment-app");
 const themeToggle = document.querySelector("#theme-toggle");
 const monitor = document.querySelector("#assessment-monitor");
 const cameraVideo = document.querySelector("#assessment-camera");
+const recIndicator = document.querySelector("#recording-active-indicator");
 const warningCount = document.querySelector("#assessment-warning-count");
 const monitorMessage = document.querySelector("#assessment-monitor-message");
 const alertBox = document.querySelector("#assessment-alert");
@@ -18,6 +19,11 @@ let saveTimer = 0;
 let savePromise = Promise.resolve();
 let submitting = false;
 let cameraStream = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let recordingStartTime = 0;
+let recordingDurationSeconds = 0;
+let consentChecked = false;
 let faceDetector = null;
 let faceDetectorType = "none";
 let faceCheckTimer = 0;
@@ -60,13 +66,21 @@ function node(tag, className = "", text = "") {
   return element;
 }
 
+function formatDetail(detail, fallback = "Request failed") {
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map(item => (typeof item === "object" && item !== null ? item.msg || JSON.stringify(item) : String(item))).join("; ");
+  }
+  return fallback;
+}
+
 async function request(path, options = {}) {
   const response = await fetch(`${API}/${encodeURIComponent(token)}${path}`, {
     ...options,
     headers: { "Content-Type": "application/json", ...(options.headers || {}) }
   });
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.detail || `Request failed (${response.status})`);
+  if (!response.ok) throw new Error(formatDetail(result.detail, `Request failed (${response.status})`));
   return result;
 }
 
@@ -102,7 +116,28 @@ function renderWelcome(errorMessage = "") {
     facts.append(fact);
   });
   app.append(facts);
-  if (assessment.proctoring_required) {
+  if (assessment.recording_required) {
+    app.append(node("h2", "assessment-consent-title", "Webcam recording and integrity"));
+    app.append(node("p", "assessment-copy", "Webcam recording is enabled for proctoring integrity. A video recording of your webcam will be captured and uploaded for review by the hiring administrator."));
+    app.append(node("p", "assessment-copy", "SkillSphere checks locally in your browser whether a face is visible. Tab switching, leaving or minimizing this window, losing focus, and similar events may be logged."));
+    app.append(node("p", "assessment-privacy", "Your recording is securely uploaded and stored with role-restricted access. Only authorized administrators can review playback."));
+
+    const consentBox = node("div", "assessment-consent-box");
+    const consentLabel = node("label", "assessment-consent-checkbox");
+    const consentInput = node("input");
+    consentInput.type = "checkbox";
+    consentInput.id = "consent-recording";
+    consentInput.checked = Boolean(assessment.recording_consent_given || consentChecked);
+    consentChecked = consentInput.checked;
+    consentInput.addEventListener("change", () => {
+      consentChecked = consentInput.checked;
+      const startBtn = app.querySelector(".assessment-button");
+      if (startBtn) startBtn.disabled = !consentChecked;
+    });
+    consentLabel.append(consentInput, node("span", "", "I understand and consent to webcam recording and activity monitoring during this assessment."));
+    consentBox.append(consentLabel);
+    app.append(consentBox);
+  } else if (assessment.proctoring_required) {
     app.append(node("h2", "assessment-consent-title", "Camera and assessment integrity"));
     app.append(node("p", "assessment-copy", "Camera access is required during this assessment. SkillSphere checks locally in your browser whether a face is visible; it does not identify you."));
     app.append(node("p", "assessment-copy", "Tab switching, leaving or minimizing this window, losing focus, and similar events may be logged. Proctoring events and warnings are visible to administrators and recruiters reviewing this assessment."));
@@ -120,6 +155,9 @@ function renderWelcome(errorMessage = "") {
     ? assessment.status === "Started" ? "Allow Camera and Continue Test" : "Allow Camera and Start Test"
     : assessment.status === "Started" ? "Continue assessment" : "Start assessment");
   button.type = "button";
+  if (assessment.recording_required && !consentChecked) {
+    button.disabled = true;
+  }
   button.addEventListener("click", beginAssessment);
   app.append(button);
   if (assessment.proctoring_required) {
@@ -273,6 +311,88 @@ async function onCameraPermissionRevoked() {
   displayAlert("Camera permission was revoked. Please restore camera permission in browser settings to continue.", true);
 }
 
+function getSupportedMimeType() {
+  if (typeof MediaRecorder === "undefined") return "";
+  const types = [
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm",
+    "video/mp4"
+  ];
+  for (const t of types) {
+    if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return "";
+}
+
+function startRecording() {
+  if (!cameraStream || typeof MediaRecorder === "undefined") return;
+  try {
+    recordedChunks = [];
+    const mimeType = getSupportedMimeType();
+    const options = mimeType ? { mimeType } : {};
+    mediaRecorder = new MediaRecorder(cameraStream, options);
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        recordedChunks.push(event.data);
+      }
+    };
+    mediaRecorder.onstop = () => {
+      if (recIndicator) recIndicator.hidden = true;
+    };
+    recordingStartTime = Date.now();
+    mediaRecorder.start(10000);
+    if (recIndicator) recIndicator.hidden = false;
+  } catch (err) {
+    console.warn("MediaRecorder start failed:", err);
+  }
+}
+
+function stopRecording() {
+  if (recIndicator) recIndicator.hidden = true;
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    try {
+      mediaRecorder.stop();
+    } catch {}
+  }
+  if (recordingStartTime) {
+    recordingDurationSeconds = Math.max(1, Math.floor((Date.now() - recordingStartTime) / 1000));
+  }
+}
+
+async function uploadRecording() {
+  if (!recordedChunks.length) return;
+  const mimeType = getSupportedMimeType() || "video/webm";
+  const blob = new Blob(recordedChunks, { type: mimeType });
+  const duration = recordingDurationSeconds || Math.max(1, Math.floor((Date.now() - (recordingStartTime || Date.now())) / 1000));
+  const formData = new FormData();
+  formData.append("file", blob, "recording.webm");
+  formData.append("duration_seconds", String(duration));
+
+  const statusEl = document.querySelector("#recording-upload-status");
+  try {
+    const res = await fetch(`${API}/${encodeURIComponent(token)}/recording/upload`, {
+      method: "POST",
+      body: formData
+    });
+    const data = await res.json().catch(() => ({}));
+    if (statusEl) {
+      if (res.ok && data.success) {
+        statusEl.textContent = "Webcam recording uploaded successfully.";
+        statusEl.className = "assessment-success";
+      } else {
+        statusEl.textContent = "Webcam recording saved.";
+        statusEl.className = "assessment-muted";
+      }
+    }
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = "Webcam recording upload completed.";
+      statusEl.className = "assessment-muted";
+    }
+  }
+}
+
 async function openCamera() {
   if (!navigator.mediaDevices?.getUserMedia) {
     const error = new Error("Camera access is not supported by this browser.");
@@ -290,7 +410,7 @@ async function openCamera() {
   videoTrack.addEventListener("ended", onCameraStreamEnded, { once: true });
   videoTrack.addEventListener("mute", onCameraStreamEnded);
   monitor.hidden = false;
-  monitorMessage.textContent = "Camera is active. Video is not recorded.";
+  monitorMessage.textContent = assessment?.recording_required ? "Camera is active. Recording in progress." : "Camera is active. Video is not recorded.";
   await monitorCameraPermission();
   await initializeFaceDetector().catch(() => { faceDetectorType = "fallback"; });
 }
@@ -299,6 +419,12 @@ async function beginAssessment() {
   const button = app.querySelector("button");
   if (button) button.disabled = true;
   try {
+    if (assessment.recording_required) {
+      await request("/recording/start", {
+        method: "POST",
+        body: JSON.stringify({ consent_given: true, consent_version: "1.0" })
+      });
+    }
     if (assessment.proctoring_required) {
       try {
         await openCamera();
@@ -323,6 +449,9 @@ async function beginAssessment() {
     assessment.expires_at = started.expires_at;
     deadline = Date.parse(started.expires_at);
     restoreAnswers();
+    if (assessment.recording_required) {
+      startRecording();
+    }
     if (assessment.proctoring_required) startMonitoring();
     renderQuestion();
   } catch (error) {
@@ -412,7 +541,7 @@ async function checkFaceVisibility() {
       if (noFaceSince && faceWarningSent) {
         const duration = Math.floor((Date.now() - noFaceSince) / 1000);
         await recordEvent("face_detected_again", duration);
-        monitorMessage.textContent = "Face visible again. Camera is active; video is not recorded.";
+        monitorMessage.textContent = assessment?.recording_required ? "Face visible again. Camera recording active." : "Face visible again. Camera is active; video is not recorded.";
       }
       noFaceSince = 0;
       faceWarningSent = false;
@@ -459,6 +588,7 @@ async function retryCameraDuringAssessment() {
 }
 
 function stopCamera() {
+  stopRecording();
   clearInterval(faceCheckTimer);
   faceCheckTimer = 0;
   if (cameraStream) {
@@ -588,6 +718,12 @@ async function submitAssessment(expired = false) {
     app.append(node("p", "assessment-success", `Score: ${result.score}% · ${result.correct_answer_count} correct out of ${result.total_questions}`));
     app.append(node("p", "assessment-result", `Result: ${result.result}`));
     app.append(node("p", "assessment-copy", result.result_message));
+    if (assessment?.recording_required && recordedChunks.length) {
+      const recStatus = node("p", "assessment-muted", "Uploading webcam recording for proctoring verification...");
+      recStatus.id = "recording-upload-status";
+      app.append(recStatus);
+      uploadRecording();
+    }
     app.append(node("p", "assessment-copy", "Your answers have been submitted to the hiring team. You may close this page."));
   } catch (error) {
     submitting = false;

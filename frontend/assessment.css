@@ -407,6 +407,56 @@ body::after { background: #9c8bfa; }
   font-size: 10px;
 }
 .camera-active-indicator i { width: 7px; height: 7px; border-radius: 50%; background: #57d69a; }
+.recording-active-indicator {
+  position: absolute;
+  left: 7px;
+  bottom: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border-radius: 20px;
+  color: #fff;
+  background: rgba(190, 24, 24, 0.88);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.recording-active-indicator .rec-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff4d4d;
+  box-shadow: 0 0 6px #ff4d4d;
+  animation: rec-pulse 1.4s infinite ease-in-out;
+}
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.8); }
+}
+.assessment-consent-box {
+  margin: 14px 0 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+.assessment-consent-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+}
+.assessment-consent-checkbox input[type="checkbox"] {
+  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
 .assessment-monitor-status { padding: 9px 11px 11px; }
 .assessment-monitor-status strong { font-size: 11px; }
 .assessment-monitor-status p { margin: 4px 0 0; color: var(--assessment-muted); font-size: 10px; line-height: 1.45; }
